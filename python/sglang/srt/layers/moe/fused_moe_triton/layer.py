@@ -1112,7 +1112,7 @@ class FlashInferFP4MoE(FusedMoE):
                 None,
                 RoutingMethodType.DeepSeekV3,
                 True,
-                None,
+                int(num_tokens),
             )
         else:
             from flashinfer.fused_moe import trtllm_fp4_block_scale_moe
