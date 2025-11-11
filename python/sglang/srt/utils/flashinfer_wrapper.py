@@ -56,12 +56,12 @@ def trtllm_fp4_block_scale_moe(  # type: ignore[no-redef]
 
     Returns the output tensor (FlashInfer returns a tuple; we return the first element).
     """
-    try:
-        from flashinfer.fused_moe import trtllm_fp4_block_scale_moe as _impl
-    except Exception as e:
-        raise RuntimeError(
-            "FlashInfer TRTLLM MoE is not available; cannot execute custom op."
-        ) from e
+    from flashinfer.fused_moe import trtllm_fp4_block_scale_moe as _impl
+
+    # Don't use a tensor
+    if isinstance(routed_scaling_factor, torch.Tensor):
+        if routed_scaling_factor.numel() == 1:
+            routed_scaling_factor = float(routed_scaling_factor.item())
 
     result_tuple = _impl(
         routing_logits=routing_logits,

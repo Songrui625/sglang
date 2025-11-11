@@ -1104,7 +1104,11 @@ class FlashInferFP4MoE(FusedMoE):
                 self.intermediate_size_per_partition,
                 self.moe_ep_rank * self.num_local_experts,
                 self.num_local_experts,
-                self.moe_runner_config.routed_scaling_factor,
+                torch.tensor(
+                    float(self.moe_runner_config.routed_scaling_factor),
+                    dtype=torch.float32,
+                    device=hs_fp4.device,
+                ),
                 None,
                 RoutingMethodType.DeepSeekV3,
                 True,
