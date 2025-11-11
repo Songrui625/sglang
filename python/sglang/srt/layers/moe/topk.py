@@ -110,17 +110,17 @@ class TopKOutputChecker:
 
     @staticmethod
     def format_is_standard(topk_output: TopKOutput) -> TypeGuard[StandardTopKOutput]:
-        return topk_output.format.is_standard()
+        return topk_output.format == TopKOutputFormat.STANDARD
 
     @staticmethod
     def format_is_triton_kernels(
         topk_output: TopKOutput,
     ) -> TypeGuard[TritonKernelTopKOutput]:
-        return topk_output.format.is_triton_kernels()
+        return topk_output.format == TopKOutputFormat.TRITON_KERNEL
 
     @staticmethod
     def format_is_bypassed(topk_output: TopKOutput) -> TypeGuard[BypassedTopKOutput]:
-        return topk_output.format.is_bypassed()
+        return topk_output.format == TopKOutputFormat.BYPASSED
 
 
 class TopKOutputFormat(Enum):
