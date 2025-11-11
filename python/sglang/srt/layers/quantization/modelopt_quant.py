@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
+from sglang.srt.compilation.piecewise_context_manager import get_forward_context
 from sglang.srt.distributed import get_tp_group
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
@@ -48,7 +49,12 @@ from sglang.srt.layers.quantization.utils import (
     requantize_with_max_scale,
 )
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.utils import get_bool_env_var, is_cuda, next_power_of_2
+from sglang.srt.utils import (
+    direct_register_custom_op,
+    get_bool_env_var,
+    is_cuda,
+    next_power_of_2,
+)
 from sglang.srt.utils.common import is_sm120_supported
 
 if TYPE_CHECKING:
@@ -717,6 +723,62 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         return self.runner.run(dispatch_output, quant_info)
 
 
+############################
+# FP4 GEMM custom op shim #
+############################
+
+
+def _unified_fp4_gemm(
+    x_fp4: torch.Tensor,
+    w: torch.Tensor,
+    x_scale_interleaved: torch.Tensor,
+    w_scale_interleaved: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype_tag: int,
+    backend: str,
+    x_m: int,
+    w_n: int,
+) -> torch.Tensor:
+    # Reconstruct dtype tag
+    out_dtype = torch.float8_e4m3fn if out_dtype_tag == 1 else x_scale_interleaved.dtype
+    # Call the real kernel
+    return fp4_gemm(
+        x_fp4,
+        w,
+        x_scale_interleaved,
+        w_scale_interleaved,
+        alpha,
+        out_dtype,
+        **(dict(backend=backend) if backend else {}),
+    )
+
+
+def _fake_unified_fp4_gemm(
+    x_fp4: torch.Tensor,
+    w: torch.Tensor,
+    x_scale_interleaved: torch.Tensor,
+    w_scale_interleaved: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype_tag: int,
+    backend: str,
+    x_m: int,
+    w_n: int,
+) -> torch.Tensor:
+    # Allocate a fake output with the correct shape and dtype for tracing
+    # Use alpha's device; dtype approximated by x_scale_interleaved dtype
+    fake_dtype = x_scale_interleaved.dtype
+    return alpha.new_empty((x_m, w_n), dtype=fake_dtype)
+
+
+# Register the custom op so Dynamo can trace through a fake while runtime uses the real kernel
+direct_register_custom_op(
+    op_name="unified_fp4_gemm",
+    op_func=_unified_fp4_gemm,
+    mutates_args=[],
+    fake_impl=_fake_unified_fp4_gemm,
+)
+
+
 class ModelOptFp4Config(ModelOptQuantConfig):
     """Config class for FP4."""
 
@@ -1079,15 +1141,30 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         backend = (
             FLASHINFER_FP4_GEMM_BACKEND if FLASHINFER_FP4_GEMM_BACKEND else "cutlass"
         )
-        out = fp4_gemm(
-            x_fp4,
-            w,
-            x_scale_interleaved,
-            w_scale_interleaved,
-            layer.alpha,
-            output_dtype,
-            **(dict(backend=backend)),
-        )
+        # During torch.compile tracing, fp4_gemm may trigger file-system ops (e.g., JIT build),
+        # which Dynamo cannot trace. Route through a custom op with a fake impl.
+        if get_forward_context() is None:
+            out = fp4_gemm(
+                x_fp4,
+                w,
+                x_scale_interleaved,
+                w_scale_interleaved,
+                layer.alpha,
+                output_dtype,
+                **(dict(backend=backend)),
+            )
+        else:
+            out = torch.ops.sglang.unified_fp4_gemm(
+                x_fp4,
+                w,
+                x_scale_interleaved,
+                w_scale_interleaved,
+                layer.alpha,
+                int(output_dtype == torch.float8_e4m3fn),  # pass dtype tag for fake
+                backend if backend is not None else "",
+                x_m,
+                w_n,
+            )
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
