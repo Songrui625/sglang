@@ -778,6 +778,40 @@ direct_register_custom_op(
     fake_impl=_fake_unified_fp4_gemm,
 )
 
+###############################
+# FP4 quantize custom op shim #
+###############################
+
+
+def _unified_fp4_quantize(
+    x: torch.Tensor,
+    input_scale_inv: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Call the real quantize kernel
+    return fp4_quantize(x, input_scale_inv)
+
+
+def _fake_unified_fp4_quantize(
+    x: torch.Tensor,
+    input_scale_inv: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Produce tensors with the right shapes/dtypes for tracing
+    assert x.ndim >= 2
+    x_m, n = x.shape[-2], x.shape[-1]
+    # FP4 packs 2 values per byte along last dim
+    x_fp4 = x.new_empty((x_m, n // 2), dtype=torch.uint8)
+    # Interleaved scale uses 1 byte per 16 elements along last dim
+    x_scale_interleaved = x.new_empty((x_m, n // 16), dtype=torch.uint8)
+    return x_fp4, x_scale_interleaved
+
+
+direct_register_custom_op(
+    op_name="unified_fp4_quantize",
+    op_func=_unified_fp4_quantize,
+    mutates_args=[],
+    fake_impl=_fake_unified_fp4_quantize,
+)
+
 
 class ModelOptFp4Config(ModelOptQuantConfig):
     """Config class for FP4."""
@@ -1124,7 +1158,13 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         output_shape = [x_m, w_n]
 
         # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_scale_interleaved = fp4_quantize(x, layer.input_scale_inv)
+        if get_forward_context() is None:
+            x_fp4, x_scale_interleaved = fp4_quantize(x, layer.input_scale_inv)
+        else:
+            # During compile tracing, avoid inlining quant kernel assertions
+            x_fp4, x_scale_interleaved = torch.ops.sglang.unified_fp4_quantize(
+                x, layer.input_scale_inv
+            )
 
         assert x_fp4.dtype == torch.uint8
         assert layer.weight.dtype == torch.uint8
