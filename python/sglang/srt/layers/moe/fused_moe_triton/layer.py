@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 
 import torch
 
+import sglang.srt.utils.flashinfer_wrapper  # noqa: F401
 from sglang.srt.distributed import (
     get_moe_expert_parallel_rank,
     get_moe_expert_parallel_world_size,
@@ -60,14 +61,6 @@ from sglang.srt.utils import (
 
 if is_flashinfer_available():
     from flashinfer import RoutingMethodType, fp4_quantize
-
-# Try to import FP4 TRTLLM function if flashinfer is available
-trtllm_fp4_block_scale_moe = None
-if get_moe_runner_backend().is_flashinfer_trtllm():
-    try:
-        from flashinfer.fused_moe import trtllm_fp4_block_scale_moe
-    except ImportError:
-        trtllm_fp4_block_scale_moe = None
 
 _is_hip = is_hip()
 _is_cpu_amx_available = cpu_has_amx_support()
@@ -1074,7 +1067,7 @@ class FlashInferFP4MoE(FusedMoE):
             symm_output = torch.empty(
                 num_tokens, hidden_size, dtype=torch.bfloat16, device=hs_fp4.device
             )
-        result = trtllm_fp4_block_scale_moe(
+        result = torch.ops.sglang.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=topk_config.correction_bias.to(hidden_states.dtype),
             hidden_states=hs_fp4,
@@ -1107,6 +1100,6 @@ class FlashInferFP4MoE(FusedMoE):
             routing_method_type=RoutingMethodType.DeepSeekV3,
             do_finalize=True,
             output=symm_output,
-        )[0]
+        )
 
         return result
